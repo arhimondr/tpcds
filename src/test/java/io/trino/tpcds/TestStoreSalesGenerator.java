@@ -14,13 +14,28 @@
 
 package io.trino.tpcds;
 
+import com.google.common.base.Stopwatch;
+import com.google.common.hash.HashCode;
+import com.google.common.hash.Hashing;
+import com.google.common.io.Files;
+import com.google.common.io.MoreFiles;
 import io.trino.tpcds.Parallel.ChunkBoundaries;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
+import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.trino.tpcds.GeneratorAssertions.assertPartialMD5;
 import static io.trino.tpcds.Parallel.splitWork;
 import static io.trino.tpcds.Session.getDefaultSession;
 import static io.trino.tpcds.Table.STORE_SALES;
+import static java.lang.ProcessBuilder.Redirect.INHERIT;
+import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.testng.Assert.assertEquals;
 
 public class TestStoreSalesGenerator
 {
@@ -135,6 +150,96 @@ public class TestStoreSalesGenerator
         session = session.withChunkNumber(100000);
         chunkBoundaries = splitWork(STORE_SALES, session);
         assertPartialMD5(chunkBoundaries.getFirstRow(), chunkBoundaries.getLastRow(), STORE_SALES, session, "b0ba7317a92c8ab4eaf0d9233ad37ecb");
+    }
+
+    @DataProvider(parallel = true)
+    public Object[][] testScaleFactor10000ExtendedProvider()
+    {
+        return new Object[][] {
+//                new Object[] {930, 123, "85a5093fe069f3a722ecc7d72f36c87e"},
+//                new Object[] {930, 1, "cbc9984365102448d5b1ff0f62012622"},
+                new Object[] {930, 272, "e1336aa1c1f52b6e040c67422955193b"},
+//                new Object[] {930, 313, "28e4ebc2e751dd8303eaa9bb2222e404"},
+//                new Object[] {930, 3, "dd90ea813e4ab4cc750673a8bc48b072"},
+//                new Object[] {930, 777, "e1ffbb11578d8c4aa7f70438e48d140c"},
+//                new Object[] {930, 7, "15f900e8a01bae6b441cfd70bf7d899a"},
+//                new Object[] {930, 877, "0a16900b569fc4dca5f0d9519e0541f0"},
+//                new Object[] {930, 929, "e4c8e5dd3e4840e88f63c1bd4a04c499"},
+//                new Object[] {930, 930, "37f76ea69d9c314d38a6ef27c6f70c38"}
+        };
+    }
+
+    @Test(dataProvider = "testScaleFactor10000ExtendedProvider", threadPoolSize = 10)
+    public void testScaleFactor10000Extended(int parallelism, int chunk, String expected)
+    {
+        Session session = TEST_SESSION.withScale(10000).withParallelism(parallelism).withChunkNumber(chunk);
+        ChunkBoundaries chunkBoundaries = splitWork(STORE_SALES, session);
+        assertPartialMD5(chunkBoundaries.getFirstRow(), chunkBoundaries.getLastRow(), STORE_SALES, session, expected);
+    }
+
+    @Test
+    public void testChunkBoundaries()
+    {
+
+    }
+
+    private static final File DSDGEN_DIRECTORY = new File("/home/andriirosa/Downloads/DSGen-software-code-3.2.0rc1/tools");
+
+    @DataProvider(parallel = true)
+    public Object[][] testGeneratedProvider()
+    {
+        int scaleFactor = 10000;
+        int parallelism = 930;
+        int step = 271;
+        List<Object[]> result = new ArrayList<>();
+//        for (int chunk = 1; chunk <= parallelism; chunk += step) {
+//            result.add(new Object[] {scaleFactor, parallelism, chunk});
+//        }
+        result.add(new Object[] {scaleFactor, parallelism, 272});
+        return result.toArray(new Object[][] {{}});
+    }
+
+    @Test(dataProvider = "testGeneratedProvider", threadPoolSize = 10)
+    public void testGenerated(int scaleFactor, int parallelism, int chunk)
+            throws Exception
+    {
+        File dir = Files.createTempDir();
+        dir.deleteOnExit();
+
+        Stopwatch stopwatch = Stopwatch.createStarted();
+        ProcessBuilder processBuilder = new ProcessBuilder(
+                "./dsdgen",
+                "-table", "store_sales",
+                "-scale", Integer.toString(scaleFactor),
+                "-parallel", Integer.toString(parallelism),
+                "-child", Integer.toString(chunk),
+                "-dir", dir.getAbsolutePath());
+        processBuilder.directory(DSDGEN_DIRECTORY);
+        processBuilder.redirectOutput(INHERIT);
+        processBuilder.redirectError(INHERIT);
+        Process p = processBuilder.start();
+        int exitCode = p.waitFor();
+        assertEquals(exitCode, 0);
+        System.out.printf("dsdgen completed in %s for chunk %s\n", stopwatch, chunk);
+
+        File file = new File(format("%s/store_sales_%s_%s.dat", dir.getAbsolutePath(), chunk, parallelism));
+
+        stopwatch.reset().start();
+        HashCode hash = Files.asByteSource(file).hash(Hashing.md5());
+        String expectedHash = hash.toString();
+        System.out.printf("md5 hash computed in %s for chunk %s\n", stopwatch, chunk);
+
+        stopwatch.reset().start();
+        long numberOfRows = Files.asCharSource(file, UTF_8).lines().count();
+        System.out.printf("number of rows [%s] computed in %s for chunk %s\n", numberOfRows, stopwatch, chunk);
+
+        MoreFiles.deleteRecursively(dir.toPath(), ALLOW_INSECURE);
+
+        stopwatch.reset().start();
+        Session session = TEST_SESSION.withScale(scaleFactor).withParallelism(parallelism).withChunkNumber(chunk);
+        ChunkBoundaries chunkBoundaries = splitWork(STORE_SALES, session);
+        assertPartialMD5(chunkBoundaries.getFirstRow(), chunkBoundaries.getLastRow(), STORE_SALES, session, expectedHash);
+        System.out.printf("actual md5 hash generated in %s for chunk %s\n", stopwatch, chunk);
     }
 
     @Test
